@@ -698,6 +698,110 @@ def _resumo_textual(df: pd.DataFrame, demandas: pd.DataFrame) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Página — Compliance
+# ---------------------------------------------------------------------------
+
+def _cartao(rotulo: str, valor, cor: str, nota: str = "") -> str:
+    return (
+        f"<div style='border-left:6px solid {cor};background:rgba(0,0,0,0.03);"
+        f"padding:12px 16px;border-radius:6px;height:100%;'>"
+        f"<div style='font-size:0.72rem;color:{cor};font-weight:600;"
+        f"text-transform:uppercase;letter-spacing:.04em;'>{rotulo}</div>"
+        f"<div style='font-size:2rem;font-weight:700;line-height:1.15;'>{valor}</div>"
+        + (f"<div style='font-size:0.72rem;color:#6B6B6B;'>{nota}</div>" if nota else "")
+        + "</div>"
+    )
+
+
+def pagina_compliance(df: pd.DataFrame) -> None:
+    st.subheader("Compliance — o acervo é auditável?")
+    st.caption(
+        "Cada checagem é uma pergunta objetiva com resposta verificável na "
+        "planilha. Nenhuma usa IA, estimativa ou julgamento: ou o dado está lá, "
+        "ou não está. Todas as listas são exportáveis."
+    )
+
+    if df.empty:
+        st.info("Nenhum registro nos filtros atuais.")
+        return
+
+    indices = repo.indice_conformidade(df)
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(
+        _cartao("Integridade", f"{indices['integridade']}%", "#1E7B34",
+                "sem duplicata, sem chave faltando, anexo com link"),
+        unsafe_allow_html=True,
+    )
+    c2.markdown(
+        _cartao("Rastreio da classificação", f"{indices['rastreio']}%", "#0B3C5D",
+                "registros com origem declarada (label ou regra)"),
+        unsafe_allow_html=True,
+    )
+    cor_etiqueta = "#1E7B34" if indices["etiquetagem"] >= 80 else (
+        "#E8710A" if indices["etiquetagem"] >= 40 else "#B3261E"
+    )
+    c3.markdown(
+        _cartao("Conferência humana", f"{indices['etiquetagem']}%", cor_etiqueta,
+                "com marcador aplicado no Gmail"),
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+    resumo = repo.checagens_compliance(df)
+    if resumo.empty:
+        st.info("Nenhuma checagem aplicável às colunas presentes.")
+        return
+
+    graves = int(resumo[resumo["GRAVIDADE"] == repo.GRAVE]["QTD"].sum())
+    if graves == 0:
+        st.success("Nenhuma ocorrência GRAVE nos filtros atuais.")
+    else:
+        st.error(f"{graves} ocorrência(s) GRAVE — resolver antes de usar o acervo como prova.")
+
+    st.dataframe(
+        resumo[["GRAVIDADE", "CHECAGEM", "QTD", "% DO TOTAL", "O QUE SIGNIFICA"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+    st.markdown("**Abrir os registros de cada checagem**")
+    for _, linha in resumo[resumo["QTD"] > 0].iterrows():
+        cor = repo.COR_GRAVIDADE_COMPLIANCE[linha["GRAVIDADE"]]
+        with st.expander(f"{linha['CHECAGEM']} — {linha['QTD']} registro(s)"):
+            st.markdown(
+                f"<span style='color:{cor};font-weight:600;'>{linha['GRAVIDADE']}</span> · "
+                f"{linha['O QUE SIGNIFICA']}",
+                unsafe_allow_html=True,
+            )
+            afetados = repo.registros_da_checagem(df, linha["_chave"])
+            colunas = [c for c in [
+                "ID_REGISTRO", "ID_MENSAGEM", "DATA_HORA_ENVIO", "REMETENTE_EMAIL",
+                "ASSUNTO", "LABELS_GMAIL", "TEMA", "STATUS_PROVIDENCIA",
+            ] if c in afetados.columns]
+            st.dataframe(afetados[colunas], use_container_width=True, hide_index=True, height=260)
+            st.download_button(
+                "⬇️ Baixar esta lista (CSV)",
+                afetados[colunas].to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"compliance_{linha['_chave'].lower()}.csv",
+                mime="text/csv",
+                key=f"csv_{linha['_chave']}",
+            )
+
+    st.divider()
+    st.markdown("**Cobertura por marcador do Gmail**")
+    por_label = repo.contagem_por_label(df)
+    if por_label.empty:
+        st.caption("Nenhum marcador presente nos registros filtrados.")
+    else:
+        st.dataframe(por_label, use_container_width=True, hide_index=True)
+        st.caption(
+            "A soma pode passar do total: um e-mail com três marcadores é contado "
+            "nos três. Isso é esperado, não é erro de contagem."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Barra lateral e roteamento
 # ---------------------------------------------------------------------------
 
@@ -748,6 +852,21 @@ def main() -> None:
             "Natureza", sorted(v for v in df_completo["NATUREZA"].unique() if v)
         )
         temas = st.multiselect("Tema", sorted(v for v in df_completo["TEMA"].unique() if v))
+        marcadores_presentes = repo.labels_distintos(df_completo)
+        opcoes_marcador = ([repo.SEM_LABEL] + marcadores_presentes) if marcadores_presentes else []
+        marcadores = st.multiselect(
+            "Marcador do Gmail",
+            opcoes_marcador,
+            help="Filtra pelo rótulo literal aplicado na caixa. Diferente de Tema, "
+                 "que é o vocabulário normalizado.",
+        )
+        exigir_todos = False
+        if len(marcadores) > 1:
+            exigir_todos = st.checkbox(
+                "Exigir TODOS os marcadores selecionados", value=False,
+                help="Desmarcado = e-mail com qualquer um deles.",
+            )
+
         situacoes = st.multiselect(
             "Situação do prazo", sorted(v for v in df_completo["SITUACAO_PRAZO"].unique() if v)
         )
@@ -787,7 +906,8 @@ def main() -> None:
 
         pagina = st.radio(
             "Página",
-            ["🚦 Alertas", "Dashboard geral", "B.I.", "Demandas", "Prazos", "Auxílio Bolsa", "Acompanhamento", "Ruído"],
+            ["🚦 Alertas", "Dashboard geral", "B.I.", "Demandas", "Prazos",
+             "Compliance", "Auxílio Bolsa", "Acompanhamento", "Ruído"],
             label_visibility="collapsed",
         )
 
@@ -821,6 +941,7 @@ def main() -> None:
     df_filtrado = repo.filtrar_por_eixo(df_filtrado, "NATUREZA", naturezas)
     df_filtrado = repo.filtrar_por_eixo(df_filtrado, "TEMA", temas)
     df_filtrado = repo.filtrar_por_eixo(df_filtrado, "SITUACAO_PRAZO", situacoes)
+    df_filtrado = repo.filtrar_por_label(df_filtrado, marcadores, exigir_todos=exigir_todos)
 
     if escopo == "Só trabalho (sem ruído)":
         df_escopo = repo.sem_ruido(df_filtrado)
@@ -839,6 +960,8 @@ def main() -> None:
         pagina_demandas(df_escopo)
     elif pagina == "Prazos":
         pagina_prazos(df_escopo, parametros.get("PARAMETROS_PRAZO"))
+    elif pagina == "Compliance":
+        pagina_compliance(df_filtrado)
     elif pagina == "Auxílio Bolsa":
         pagina_auxilio_bolsa(df_escopo)
     elif pagina == "Acompanhamento":
