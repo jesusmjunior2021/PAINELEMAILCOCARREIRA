@@ -277,6 +277,93 @@ def limites_de_data(df: pd.DataFrame) -> Optional[Tuple[pd.Timestamp, pd.Timesta
 import classificador as _cls          # noqa: E402
 import motor_prazos as _prazos        # noqa: E402
 
+# ---------------------------------------------------------------------------
+# Alerta semiótico único — a resposta direta para "isso é lixo, urgente,
+# precisa de atenção ou já está em dia?" numa cor só por registro.
+# Combina E_RUIDO (classificador.py) + SITUACAO_PRAZO (motor_prazos.py) +
+# STATUS_PROVIDENCIA/STATUS_TRATAMENTO — nada aqui é recalculado, só
+# reaproveita o que os dois módulos já produziram, numa prioridade única.
+# ---------------------------------------------------------------------------
+
+LIXO_RUIDO = "LIXO_RUIDO"
+VENCIDO_ALERTA = "VENCIDO"
+VENCENDO_ALERTA = "VENCENDO"
+ATENCAO_SEM_PRAZO = "ATENCAO_SEM_PRAZO"
+EM_DIA = "EM_DIA"
+
+ROTULO_ALERTA: Dict[str, str] = {
+    LIXO_RUIDO: "Lixo / ruído — sem providência",
+    VENCIDO_ALERTA: "Vencido — providência urgente",
+    VENCENDO_ALERTA: "Vencendo — atenção",
+    ATENCAO_SEM_PRAZO: "Sem prazo formal, mas sem resposta",
+    EM_DIA: "Em dia",
+}
+
+ICONE_ALERTA: Dict[str, str] = {
+    LIXO_RUIDO: "⚪",
+    VENCIDO_ALERTA: "🔴",
+    VENCENDO_ALERTA: "🟠",
+    ATENCAO_SEM_PRAZO: "🟡",
+    EM_DIA: "🟢",
+}
+
+COR_ALERTA: Dict[str, str] = {
+    LIXO_RUIDO: "#6B6B6B",
+    VENCIDO_ALERTA: "#B3261E",
+    VENCENDO_ALERTA: "#E8710A",
+    ATENCAO_SEM_PRAZO: "#C9A227",
+    EM_DIA: "#1E7B34",
+}
+
+_STATUS_TRATAMENTO_RESOLVIDO = {"Respondido", "Arquivado/Removido", "Enviado por nós"}
+_STATUS_PROVIDENCIA_RESOLVIDO = {"Concluída", "Sem providência necessária"}
+
+
+def _alerta_linha(linha: pd.Series) -> str:
+    if str(linha.get("E_RUIDO", "")) == "SIM":
+        return LIXO_RUIDO
+
+    situacao = str(linha.get("SITUACAO_PRAZO", ""))
+    if situacao == _prazos.VENCIDO:
+        return VENCIDO_ALERTA
+    if situacao == _prazos.VENCENDO:
+        return VENCENDO_ALERTA
+    if situacao == _prazos.DENTRO_DO_PRAZO:
+        return EM_DIA
+
+    # Sem prazo parametrizado ou sem data-base: só é "em dia" se já foi
+    # tratado; senão é a categoria "precisa de decisão humana, sem prazo formal".
+    if (
+        str(linha.get("STATUS_TRATAMENTO", "")) in _STATUS_TRATAMENTO_RESOLVIDO
+        or str(linha.get("STATUS_PROVIDENCIA", "")) in _STATUS_PROVIDENCIA_RESOLVIDO
+    ):
+        return EM_DIA
+    return ATENCAO_SEM_PRAZO
+
+
+def calcular_alerta(df: pd.DataFrame) -> pd.DataFrame:
+    """Acrescenta a coluna ALERTA (um dos 5 códigos acima) ao DataFrame."""
+    resultado = df.copy()
+    if resultado.empty:
+        resultado["ALERTA"] = pd.Series(dtype=str)
+        return resultado
+    resultado["ALERTA"] = resultado.apply(_alerta_linha, axis=1)
+    return resultado
+
+
+def resumo_alerta(df: pd.DataFrame) -> Dict[str, int]:
+    contagens = {codigo: 0 for codigo in ROTULO_ALERTA}
+    if "ALERTA" not in df.columns:
+        return contagens
+    for codigo, quantidade in df["ALERTA"].value_counts().items():
+        if codigo in contagens:
+            contagens[codigo] = int(quantidade)
+    return contagens
+
+
+ORDEM_GRAVIDADE_ALERTA = [VENCIDO_ALERTA, VENCENDO_ALERTA, ATENCAO_SEM_PRAZO, EM_DIA, LIXO_RUIDO]
+
+
 COLUNAS_TABELA_DEMANDA: List[str] = [
     "ASSUNTO", "TEMA", "NATUREZA", "ESTADO_DEMANDA", "QTD_MENSAGENS",
     "ULTIMA_MENSAGEM", "RESPONDIDA_POR_NOS", "NUMERO_PROCESSO",
