@@ -146,6 +146,70 @@ def bloco_detalhe(linha: pd.Series) -> None:
         st.caption("Corpo vazio na fonte.")
 
 
+def pagina_alertas(df: pd.DataFrame) -> None:
+    st.subheader("🚦 Painel de Alertas — triagem em uma tela só")
+    st.caption(
+        "Combina ruído (classificador.py) + prazo (motor_prazos.py) + status de "
+        "providência numa cor só por e-mail. Não recalcula nada — só prioriza o "
+        "que os dois módulos já classificaram."
+    )
+
+    df_alerta = repo.calcular_alerta(df)
+    resumo = repo.resumo_alerta(df_alerta)
+
+    colunas = st.columns(5)
+    for coluna, codigo in zip(colunas, repo.ORDEM_GRAVIDADE_ALERTA):
+        cor = repo.COR_ALERTA[codigo]
+        coluna.markdown(
+            f"<div style='border-left:6px solid {cor};background:rgba(0,0,0,0.03);"
+            f"padding:12px 16px;border-radius:6px;'>"
+            f"<div style='font-size:0.72rem;color:{cor};font-weight:600;"
+            f"text-transform:uppercase;'>{repo.ICONE_ALERTA[codigo]} {repo.ROTULO_ALERTA[codigo]}</div>"
+            f"<div style='font-size:1.9rem;font-weight:700;line-height:1.1;'>"
+            f"{resumo[codigo]}</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    if df_alerta.empty:
+        st.info("Nenhum registro nos filtros atuais.")
+        return
+
+    st.divider()
+    prioridade = st.multiselect(
+        "Mostrar somente",
+        [f"{repo.ICONE_ALERTA[c]} {repo.ROTULO_ALERTA[c]}" for c in repo.ORDEM_GRAVIDADE_ALERTA],
+        default=[
+            f"{repo.ICONE_ALERTA[c]} {repo.ROTULO_ALERTA[c]}"
+            for c in [repo.VENCIDO_ALERTA, repo.VENCENDO_ALERTA, repo.ATENCAO_SEM_PRAZO]
+        ],
+    )
+    codigos_selecionados = [
+        c for c in repo.ORDEM_GRAVIDADE_ALERTA
+        if f"{repo.ICONE_ALERTA[c]} {repo.ROTULO_ALERTA[c]}" in prioridade
+    ] or repo.ORDEM_GRAVIDADE_ALERTA
+
+    recorte = df_alerta[df_alerta["ALERTA"].isin(codigos_selecionados)].copy()
+    recorte["_ORDEM"] = recorte["ALERTA"].map({c: i for i, c in enumerate(repo.ORDEM_GRAVIDADE_ALERTA)})
+    recorte = recorte.sort_values(["_ORDEM", "DIAS_RESTANTES"], na_position="last")
+
+    if recorte.empty:
+        st.info("Nenhum registro no recorte de alerta escolhido.")
+        return
+
+    st.markdown(f"**{len(recorte)} registro(s)** — do mais urgente pro menos urgente.")
+    for _, linha in recorte.head(200).iterrows():
+        codigo = linha["ALERTA"]
+        cor = repo.COR_ALERTA[codigo]
+        icone = repo.ICONE_ALERTA[codigo]
+        prazo_txt = f" · {linha['SITUACAO_PRAZO']} ({linha['DIAS_RESTANTES']}d)" if pd.notna(linha.get("DIAS_RESTANTES")) else ""
+        with st.expander(f"{icone} {repo.rotulo_registro(linha)}{prazo_txt}"):
+            st.markdown(
+                f"<span style='color:{cor};font-weight:600;'>{repo.ROTULO_ALERTA[codigo]}</span>",
+                unsafe_allow_html=True,
+            )
+            bloco_detalhe(linha)
+
+
 # ---------------------------------------------------------------------------
 # Página 1 — Dashboard geral
 # ---------------------------------------------------------------------------
@@ -718,7 +782,7 @@ def main() -> None:
         st.divider()
         pagina = st.radio(
             "Página",
-            ["Dashboard geral", "B.I.", "Demandas", "Prazos", "Auxílio Bolsa", "Acompanhamento", "Ruído"],
+            ["🚦 Alertas", "Dashboard geral", "B.I.", "Demandas", "Prazos", "Auxílio Bolsa", "Acompanhamento", "Ruído"],
             label_visibility="collapsed",
         )
 
@@ -760,7 +824,9 @@ def main() -> None:
     else:
         df_escopo = df_filtrado
 
-    if pagina == "Dashboard geral":
+    if pagina == "🚦 Alertas":
+        pagina_alertas(df_escopo)
+    elif pagina == "Dashboard geral":
         pagina_dashboard(df_escopo, df_completo)
     elif pagina == "B.I.":
         pagina_bi(df_escopo if escopo != "Só trabalho (sem ruído)" else df_filtrado)
