@@ -485,3 +485,261 @@ def kpis_demanda(df_demandas: pd.DataFrame) -> Dict[str, int]:
         "vencidas": int((df_demandas["SITUACAO_PRAZO"] == _prazos.VENCIDO).sum()),
         "vencendo": int((df_demandas["SITUACAO_PRAZO"] == _prazos.VENCENDO).sum()),
     }
+
+
+# ---------------------------------------------------------------------------
+# FILTRO POR LABEL DO GMAIL — os marcadores reais, como fonte de recorte
+# ---------------------------------------------------------------------------
+# TEMA é o vocabulário normalizado; LABEL é o marcador literal que a equipe
+# aplicou no Gmail. Os dois não são a mesma coisa: quatro labels de turma caem
+# num TEMA só, e um e-mail pode ter vários labels ao mesmo tempo. Para
+# conferência e compliance, filtrar pelo marcador literal é o que permite
+# responder "me mostre o que está etiquetado como CURSOS/Turma 13 e 14".
+
+SEM_LABEL = "(sem marcador)"
+
+
+def labels_distintos(df: pd.DataFrame) -> List[str]:
+    """Todos os labels presentes, já desmembrados do campo concatenado."""
+    if df.empty or "LABELS_GMAIL" not in df.columns:
+        return []
+    encontrados = set()
+    for valor in df["LABELS_GMAIL"]:
+        partes = separar_lista(valor)
+        if partes:
+            encontrados.update(partes)
+    return sorted(encontrados)
+
+
+def filtrar_por_label(
+    df: pd.DataFrame,
+    labels: Optional[List[str]],
+    exigir_todos: bool = False,
+) -> pd.DataFrame:
+    """
+    Recorta pelos marcadores escolhidos.
+      exigir_todos=False -> e-mail com QUALQUER um dos labels (união)
+      exigir_todos=True  -> e-mail com TODOS eles (interseção)
+    O valor especial SEM_LABEL seleciona quem não tem marcador nenhum — é o
+    recorte que mostra o tamanho do trabalho de etiquetagem ainda pendente.
+    """
+    if not labels or "LABELS_GMAIL" not in df.columns:
+        return df
+
+    quer_sem_label = SEM_LABEL in labels
+    alvos = [l for l in labels if l != SEM_LABEL]
+
+    def casa(valor: str) -> bool:
+        presentes = separar_lista(valor)
+        if quer_sem_label and not presentes:
+            return True
+        if not alvos:
+            return False
+        if exigir_todos:
+            return all(a in presentes for a in alvos)
+        return any(a in presentes for a in alvos)
+
+    return df[df["LABELS_GMAIL"].map(casa)]
+
+
+def contagem_por_label(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Mensagens e conversas por marcador. A soma das linhas pode ultrapassar o
+    total: um e-mail com três labels é contado nos três. Isso é proposital e
+    está avisado na UI — não é erro de contagem.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["LABEL", "MENSAGENS", "CONVERSAS", "TEMA_PREDOMINANTE"])
+
+    linhas = []
+    for label in labels_distintos(df):
+        recorte = filtrar_por_label(df, [label])
+        if recorte.empty:
+            continue
+        linhas.append(
+            {
+                "LABEL": label,
+                "MENSAGENS": int(len(recorte)),
+                "CONVERSAS": int(recorte["ID_THREAD"].nunique()),
+                "TEMA_PREDOMINANTE": _moda(recorte["TEMA"]) if "TEMA" in recorte.columns else "",
+            }
+        )
+
+    sem = df[df["LABELS_GMAIL"].map(lambda v: not separar_lista(v))]
+    if not sem.empty:
+        linhas.append(
+            {
+                "LABEL": SEM_LABEL,
+                "MENSAGENS": int(len(sem)),
+                "CONVERSAS": int(sem["ID_THREAD"].nunique()),
+                "TEMA_PREDOMINANTE": _moda(sem["TEMA"]) if "TEMA" in sem.columns else "",
+            }
+        )
+
+    return pd.DataFrame(linhas).sort_values("MENSAGENS", ascending=False)
+
+
+# ---------------------------------------------------------------------------
+# COMPLIANCE — checagens auditáveis, cada uma com a lista dos registros
+# ---------------------------------------------------------------------------
+# Cada checagem é uma pergunta objetiva com resposta verificável na planilha.
+# Nenhuma delas usa IA, estimativa ou julgamento: ou o dado está lá, ou não.
+
+GRAVE = "GRAVE"
+ATENCAO = "ATENÇÃO"
+INFORMATIVO = "INFORMATIVO"
+
+COR_GRAVIDADE_COMPLIANCE = {
+    GRAVE: "#B3261E",
+    ATENCAO: "#E8710A",
+    INFORMATIVO: "#5A7D9A",
+}
+
+
+def _mask_id_duplicado(df: pd.DataFrame) -> pd.Series:
+    if "ID_MENSAGEM" not in df.columns:
+        return pd.Series(False, index=df.index)
+    return df["ID_MENSAGEM"].duplicated(keep=False) & (df["ID_MENSAGEM"].str.strip() != "")
+
+
+def _mask_anexo_sem_link(df: pd.DataFrame) -> pd.Series:
+    if "_QTD_ANEXOS_NUM" not in df.columns:
+        return pd.Series(False, index=df.index)
+    return (df["_QTD_ANEXOS_NUM"] > 0) & (df["LINKS_ANEXOS_DRIVE"].str.strip() == "")
+
+
+def _mask_bolsa_sem_servidor(df: pd.DataFrame) -> pd.Series:
+    if "TEMA" not in df.columns:
+        return pd.Series(False, index=df.index)
+    return (df["TEMA"] == "AUXILIO_BOLSA") & (df["NOME_SERVIDOR"].str.strip() == "")
+
+
+CHECAGENS_COMPLIANCE = [
+    {
+        "chave": "ID_DUPLICADO",
+        "gravidade": GRAVE,
+        "titulo": "ID_MENSAGEM duplicado",
+        "descricao": "A mesma mensagem foi gravada mais de uma vez. Quebra a "
+                     "idempotência da captura e infla toda contagem.",
+        "mask": _mask_id_duplicado,
+    },
+    {
+        "chave": "SEM_ID",
+        "gravidade": GRAVE,
+        "titulo": "Linha sem ID_MENSAGEM",
+        "descricao": "Registro sem chave. Não pode ser atualizado nem auditado, "
+                     "e o commit de propostas do Gem o rejeita.",
+        "mask": lambda df: df["ID_MENSAGEM"].str.strip() == "",
+    },
+    {
+        "chave": "ANEXO_SEM_LINK",
+        "gravidade": GRAVE,
+        "titulo": "Tem anexo mas não tem link do Drive",
+        "descricao": "O e-mail declara anexo e o arquivo não foi salvo. Documento "
+                     "de processo pode estar só no Gmail, sem cópia no acervo.",
+        "mask": _mask_anexo_sem_link,
+    },
+    {
+        "chave": "SEM_DATA",
+        "gravidade": ATENCAO,
+        "titulo": "Sem DATA_HORA_ENVIO legível",
+        "descricao": "Sem data não há prazo, não entra em série temporal e some "
+                     "de qualquer filtro por período.",
+        "mask": lambda df: df["_DATA_ENVIO"].isna(),
+    },
+    {
+        "chave": "SEM_MARCADOR",
+        "gravidade": ATENCAO,
+        "titulo": "Sem marcador no Gmail",
+        "descricao": "Classificado só por regra automática. A conferência humana "
+                     "pelo marcador ainda não aconteceu.",
+        "mask": lambda df: df["LABELS_GMAIL"].str.strip() == "",
+    },
+    {
+        "chave": "TEMA_ABERTO",
+        "gravidade": ATENCAO,
+        "titulo": "TEMA não classificado",
+        "descricao": "Nem label nem regra resolveram. É a fila de trabalho do Gem.",
+        "mask": lambda df: df["TEMA"] == "NAO_CLASSIFICADO",
+    },
+    {
+        "chave": "BOLSA_SEM_SERVIDOR",
+        "gravidade": ATENCAO,
+        "titulo": "Auxílio Bolsa sem servidor identificado",
+        "descricao": "Sem servidor não há data de término, e sem ela o prazo do "
+                     "art. 25 fica 'Não apurável'. Conferir SERVIDORES_MONITORADOS.",
+        "mask": _mask_bolsa_sem_servidor,
+    },
+    {
+        "chave": "PROVIDENCIA_PENDENTE",
+        "gravidade": INFORMATIVO,
+        "titulo": "Providência pendente",
+        "descricao": "Estado inicial de todo registro. Alto por si só não é "
+                     "problema; alto com prazo vencido é.",
+        "mask": lambda df: df["STATUS_PROVIDENCIA"].str.casefold() == "pendente",
+    },
+]
+
+
+def checagens_compliance(df: pd.DataFrame) -> pd.DataFrame:
+    """Resumo: uma linha por checagem, com contagem e percentual."""
+    total = max(len(df), 1)
+    linhas = []
+    for checagem in CHECAGENS_COMPLIANCE:
+        try:
+            quantidade = int(checagem["mask"](df).sum())
+        except (KeyError, AttributeError):
+            continue  # coluna ausente: a checagem simplesmente não se aplica
+        linhas.append(
+            {
+                "GRAVIDADE": checagem["gravidade"],
+                "CHECAGEM": checagem["titulo"],
+                "QTD": quantidade,
+                "% DO TOTAL": round(100 * quantidade / total, 1),
+                "O QUE SIGNIFICA": checagem["descricao"],
+                "_chave": checagem["chave"],
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
+def registros_da_checagem(df: pd.DataFrame, chave: str) -> pd.DataFrame:
+    for checagem in CHECAGENS_COMPLIANCE:
+        if checagem["chave"] == chave:
+            try:
+                return df[checagem["mask"](df)]
+            except (KeyError, AttributeError):
+                return df.iloc[0:0]
+    return df.iloc[0:0]
+
+
+def indice_conformidade(df: pd.DataFrame) -> Dict[str, float]:
+    """
+    Três percentuais que resumem a saúde do acervo. Não é nota, é medida:
+      integridade  — sem duplicata, sem chave faltando, anexo com link
+      rastreio     — proporção classificada com origem declarada
+      etiquetagem  — proporção conferida por marcador humano no Gmail
+    """
+    total = max(len(df), 1)
+    graves = 0
+    for checagem in CHECAGENS_COMPLIANCE:
+        if checagem["gravidade"] != GRAVE:
+            continue
+        try:
+            graves += int(checagem["mask"](df).sum())
+        except (KeyError, AttributeError):
+            pass
+
+    com_origem = 0
+    if "ORIGEM_CLASSIFICACAO" in df.columns:
+        com_origem = int((df["ORIGEM_CLASSIFICACAO"] != "NENHUMA").sum())
+
+    com_label = 0
+    if "LABELS_GMAIL" in df.columns:
+        com_label = int((df["LABELS_GMAIL"].str.strip() != "").sum())
+
+    return {
+        "integridade": round(100 * max(0, total - graves) / total, 1),
+        "rastreio": round(100 * com_origem / total, 1),
+        "etiquetagem": round(100 * com_label / total, 1),
+    }
