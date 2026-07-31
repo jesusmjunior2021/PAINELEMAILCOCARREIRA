@@ -99,6 +99,8 @@ def bloco_detalhe(linha: pd.Series) -> None:
         st.markdown(f"**Status da providência:** {linha['STATUS_PROVIDENCIA'] or '—'}")
         if linha["LINK_THREAD_GMAIL"]:
             st.link_button("Abrir no Gmail", linha["LINK_THREAD_GMAIL"])
+        if linha.get("LINK_PASTA_DRIVE"):
+            st.link_button("📁 Abrir pasta no Drive (anexos)", linha["LINK_PASTA_DRIVE"])
 
     if linha["CATEGORIA_ASSUNTO"] == "AUXÍLIO BOLSA":
         st.divider()
@@ -142,6 +144,70 @@ def bloco_detalhe(linha: pd.Series) -> None:
         )
     else:
         st.caption("Corpo vazio na fonte.")
+
+
+def pagina_alertas(df: pd.DataFrame) -> None:
+    st.subheader("🚦 Painel de Alertas — triagem em uma tela só")
+    st.caption(
+        "Combina ruído (classificador.py) + prazo (motor_prazos.py) + status de "
+        "providência numa cor só por e-mail. Não recalcula nada — só prioriza o "
+        "que os dois módulos já classificaram."
+    )
+
+    df_alerta = repo.calcular_alerta(df)
+    resumo = repo.resumo_alerta(df_alerta)
+
+    colunas = st.columns(5)
+    for coluna, codigo in zip(colunas, repo.ORDEM_GRAVIDADE_ALERTA):
+        cor = repo.COR_ALERTA[codigo]
+        coluna.markdown(
+            f"<div style='border-left:6px solid {cor};background:rgba(0,0,0,0.03);"
+            f"padding:12px 16px;border-radius:6px;'>"
+            f"<div style='font-size:0.72rem;color:{cor};font-weight:600;"
+            f"text-transform:uppercase;'>{repo.ICONE_ALERTA[codigo]} {repo.ROTULO_ALERTA[codigo]}</div>"
+            f"<div style='font-size:1.9rem;font-weight:700;line-height:1.1;'>"
+            f"{resumo[codigo]}</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    if df_alerta.empty:
+        st.info("Nenhum registro nos filtros atuais.")
+        return
+
+    st.divider()
+    prioridade = st.multiselect(
+        "Mostrar somente",
+        [f"{repo.ICONE_ALERTA[c]} {repo.ROTULO_ALERTA[c]}" for c in repo.ORDEM_GRAVIDADE_ALERTA],
+        default=[
+            f"{repo.ICONE_ALERTA[c]} {repo.ROTULO_ALERTA[c]}"
+            for c in [repo.VENCIDO_ALERTA, repo.VENCENDO_ALERTA, repo.ATENCAO_SEM_PRAZO]
+        ],
+    )
+    codigos_selecionados = [
+        c for c in repo.ORDEM_GRAVIDADE_ALERTA
+        if f"{repo.ICONE_ALERTA[c]} {repo.ROTULO_ALERTA[c]}" in prioridade
+    ] or repo.ORDEM_GRAVIDADE_ALERTA
+
+    recorte = df_alerta[df_alerta["ALERTA"].isin(codigos_selecionados)].copy()
+    recorte["_ORDEM"] = recorte["ALERTA"].map({c: i for i, c in enumerate(repo.ORDEM_GRAVIDADE_ALERTA)})
+    recorte = recorte.sort_values(["_ORDEM", "DIAS_RESTANTES"], na_position="last")
+
+    if recorte.empty:
+        st.info("Nenhum registro no recorte de alerta escolhido.")
+        return
+
+    st.markdown(f"**{len(recorte)} registro(s)** — do mais urgente pro menos urgente.")
+    for _, linha in recorte.head(200).iterrows():
+        codigo = linha["ALERTA"]
+        cor = repo.COR_ALERTA[codigo]
+        icone = repo.ICONE_ALERTA[codigo]
+        prazo_txt = f" · {linha['SITUACAO_PRAZO']} ({linha['DIAS_RESTANTES']}d)" if pd.notna(linha.get("DIAS_RESTANTES")) else ""
+        with st.expander(f"{icone} {repo.rotulo_registro(linha)}{prazo_txt}"):
+            st.markdown(
+                f"<span style='color:{cor};font-weight:600;'>{repo.ROTULO_ALERTA[codigo]}</span>",
+                unsafe_allow_html=True,
+            )
+            bloco_detalhe(linha)
 
 
 # ---------------------------------------------------------------------------
@@ -632,121 +698,6 @@ def _resumo_textual(df: pd.DataFrame, demandas: pd.DataFrame) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Página — Analítico (B.I.)
-# ---------------------------------------------------------------------------
-
-def pagina_bi(df: pd.DataFrame) -> None:
-    st.subheader("Analítico")
-    st.caption(
-        "Todos os números desta página são CONTAGEM sobre os registros filtrados. "
-        "Nada aqui é sumarização por IA nem estimativa — cada célula pode ser "
-        "reconferida na planilha."
-    )
-
-    if df.empty:
-        st.info("Nenhum registro nos filtros atuais.")
-        return
-
-    trabalho = repo.sem_ruido(df)
-    demandas = repo.agregar_por_demanda(trabalho)
-    tempos = repo.tempo_primeira_resposta(trabalho)
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Mensagens", len(df))
-    c2.metric("Demandas", len(demandas))
-    c3.metric("Sem resposta nossa", int((demandas["RESPONDIDA_POR_NOS"] == "NÃO").sum()) if not demandas.empty else 0)
-    c4.metric(
-        "Mediana p/ responder",
-        f"{tempos['HORAS_ATE_RESPOSTA'].median():.0f} h" if not tempos.empty else "—",
-        help="Horas entre a primeira mensagem recebida e a primeira resposta nossa, "
-             "apenas nas conversas que já foram respondidas. Não desconta fim de semana.",
-    )
-    c5.metric("Ruído", f"{100 * len(repo.apenas_ruido(df)) / max(len(df), 1):.0f}%")
-
-    st.divider()
-    st.markdown("**Resumo por assunto**")
-    resumo = repo.resumo_por_tema(trabalho)
-    if resumo.empty:
-        st.info("Sem temas de trabalho nos filtros atuais.")
-    else:
-        st.dataframe(resumo, use_container_width=True, hide_index=True)
-        st.caption(
-            "MENSAGENS ≫ DEMANDAS indica conversa longa (uma thread com muitas "
-            "réplicas), não volume de trabalho."
-        )
-
-    st.divider()
-    esq, dir_ = st.columns(2)
-
-    with esq:
-        st.markdown("**Entrada por dia — trabalho x ruído**")
-        volume = repo.volume_por_dia(df)
-        if volume.empty:
-            st.caption("Sem datas legíveis para montar a série.")
-        else:
-            st.altair_chart(
-                alt.Chart(volume).mark_area(opacity=0.75).encode(
-                    x=alt.X("DIA:T", title=None),
-                    y=alt.Y("QUANTIDADE:Q", stack=True, title="Mensagens"),
-                    color=alt.Color(
-                        "GRUPO:N", title=None,
-                        scale=alt.Scale(domain=["Trabalho", "Ruído"],
-                                        range=[AZUL_INSTITUCIONAL, "#C4C4C4"]),
-                    ),
-                    tooltip=["DIA:T", "GRUPO:N", "QUANTIDADE:Q"],
-                ).properties(height=280),
-                use_container_width=True,
-            )
-
-    with dir_:
-        st.markdown("**Remetentes mais frequentes (só trabalho)**")
-        remetentes = repo.top_remetentes(trabalho)
-        if remetentes.empty:
-            st.caption("Sem dados.")
-        else:
-            st.altair_chart(
-                alt.Chart(remetentes).mark_bar(color=AZUL_INSTITUCIONAL).encode(
-                    x=alt.X("QUANTIDADE:Q", title="Mensagens"),
-                    y=alt.Y("REMETENTE_EMAIL:N", sort="-x", title=None),
-                    tooltip=["REMETENTE_EMAIL", "QUANTIDADE"],
-                ).properties(height=280),
-                use_container_width=True,
-            )
-
-    st.divider()
-    st.markdown("**Tema x estado da demanda**")
-    matriz = repo.matriz_tema_estado(trabalho)
-    if matriz.empty:
-        st.caption("Sem dados.")
-    else:
-        st.altair_chart(
-            alt.Chart(matriz).mark_rect().encode(
-                x=alt.X("ESTADO_DEMANDA:N", title=None),
-                y=alt.Y("TEMA:N", title=None),
-                color=alt.Color("QUANTIDADE:Q", scale=alt.Scale(scheme="blues"), title="Mensagens"),
-                tooltip=["TEMA", "ESTADO_DEMANDA", "QUANTIDADE"],
-            ).properties(height=max(220, 24 * matriz["TEMA"].nunique())),
-            use_container_width=True,
-        )
-
-    if not tempos.empty:
-        st.divider()
-        st.markdown("**Tempo até a nossa primeira resposta**")
-        st.altair_chart(
-            alt.Chart(tempos).mark_bar(color="#5A7D9A").encode(
-                x=alt.X("HORAS_ATE_RESPOSTA:Q", title="Horas"),
-                y=alt.Y("ASSUNTO:N", sort="-x", title=None),
-                tooltip=["ASSUNTO", "TEMA", "HORAS_ATE_RESPOSTA"],
-            ).properties(height=max(160, 26 * len(tempos))),
-            use_container_width=True,
-        )
-        st.caption(
-            f"{len(tempos)} conversa(s) respondida(s). As demais ainda não têm "
-            "resposta nossa e por isso não entram nesta média — ver a página Demandas."
-        )
-
-
-# ---------------------------------------------------------------------------
 # Barra lateral e roteamento
 # ---------------------------------------------------------------------------
 
@@ -829,9 +780,14 @@ def main() -> None:
         apenas_pendentes = st.checkbox("Somente providências pendentes", value=False)
 
         st.divider()
+        st.divider()
+        link_gem = st.secrets.get("gem", {}).get("url", "") if hasattr(st, "secrets") else ""
+        if link_gem:
+            st.link_button("🤖 Abrir assistente (Gem)", link_gem, use_container_width=True)
+
         pagina = st.radio(
             "Página",
-            ["Dashboard geral", "B.I.", "Demandas", "Prazos", "Auxílio Bolsa", "Acompanhamento", "Ruído"],
+            ["🚦 Alertas", "Dashboard geral", "B.I.", "Demandas", "Prazos", "Auxílio Bolsa", "Acompanhamento", "Ruído"],
             label_visibility="collapsed",
         )
 
@@ -873,7 +829,9 @@ def main() -> None:
     else:
         df_escopo = df_filtrado
 
-    if pagina == "Dashboard geral":
+    if pagina == "🚦 Alertas":
+        pagina_alertas(df_escopo)
+    elif pagina == "Dashboard geral":
         pagina_dashboard(df_escopo, df_completo)
     elif pagina == "B.I.":
         pagina_bi(df_escopo if escopo != "Só trabalho (sem ruído)" else df_filtrado)
@@ -881,8 +839,6 @@ def main() -> None:
         pagina_demandas(df_escopo)
     elif pagina == "Prazos":
         pagina_prazos(df_escopo, parametros.get("PARAMETROS_PRAZO"))
-    elif pagina == "Analítico":
-        pagina_bi(df_filtrado)
     elif pagina == "Auxílio Bolsa":
         pagina_auxilio_bolsa(df_escopo)
     elif pagina == "Acompanhamento":
