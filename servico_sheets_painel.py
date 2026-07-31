@@ -36,6 +36,7 @@ COLUNAS_PAINEL_GERAL: List[str] = [
     "DATA_TERMINO_CURSO", "PRAZO_LIMITE_ART25", "STATUS_PRAZO_ART25",
     "RISCO_NORMATIVO_ART17",
     "PROVIDENCIA_NECESSARIA", "STATUS_PROVIDENCIA", "OBSERVACOES",
+    "LINK_PASTA_DRIVE",
 ]
 
 # Únicas colunas que este app tem permissão de escrever.
