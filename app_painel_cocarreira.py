@@ -99,6 +99,8 @@ def bloco_detalhe(linha: pd.Series) -> None:
         st.markdown(f"**Status da providência:** {linha['STATUS_PROVIDENCIA'] or '—'}")
         if linha["LINK_THREAD_GMAIL"]:
             st.link_button("Abrir no Gmail", linha["LINK_THREAD_GMAIL"])
+        if linha.get("LINK_PASTA_DRIVE"):
+            st.link_button("📁 Abrir pasta no Drive (anexos)", linha["LINK_PASTA_DRIVE"])
 
     if linha["CATEGORIA_ASSUNTO"] == "AUXÍLIO BOLSA":
         st.divider()
