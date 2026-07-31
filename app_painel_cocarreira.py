@@ -780,6 +780,11 @@ def main() -> None:
         apenas_pendentes = st.checkbox("Somente providências pendentes", value=False)
 
         st.divider()
+        st.divider()
+        link_gem = st.secrets.get("gem", {}).get("url", "") if hasattr(st, "secrets") else ""
+        if link_gem:
+            st.link_button("🤖 Abrir assistente (Gem)", link_gem, use_container_width=True)
+
         pagina = st.radio(
             "Página",
             ["🚦 Alertas", "Dashboard geral", "B.I.", "Demandas", "Prazos", "Auxílio Bolsa", "Acompanhamento", "Ruído"],
