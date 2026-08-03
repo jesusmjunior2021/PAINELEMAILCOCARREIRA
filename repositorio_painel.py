@@ -75,6 +75,184 @@ COLUNAS_TABELA_BOLSA: List[str] = [
     "STATUS_PROVIDENCIA",
 ]
 
+# ---------------------------------------------------------------------------
+# MAT-COCARREIRA-EMAILAUTO-002 — verificação de demanda, atribuição de
+# servidor responsável e prazo manual de solução.
+# ---------------------------------------------------------------------------
+
+# Tri-estado pedido pela Coordenadoria: verificada / pendente / resolvida.
+# Independente de STATUS_PROVIDENCIA (que já existe) — este eixo é sobre
+# CONFERÊNCIA do e-mail, não sobre o andamento da providência em si.
+ESTADO_VERIFICACAO_OPCOES: List[str] = ["Pendente", "Verificada", "Resolvida"]
+
+COR_ESTADO_VERIFICACAO: Dict[str, str] = {
+    "Pendente": "#C9A227",
+    "Verificada": "#1565C0",
+    "Resolvida": "#1E7B34",
+    "": "#6B6B6B",
+}
+
+# Estados que OBRIGAM observação de acompanhamento preenchida (o que foi
+# feito), por pedido explícito da Coordenadoria — não é mero rótulo solto.
+ESTADOS_QUE_EXIGEM_OBSERVACAO = {"Verificada", "Resolvida"}
+
+# Colunas que o usuário de fato digita/seleciona no editor. As demais colunas
+# editáveis (matrícula, data de atribuição, data-limite do prazo manual) são
+# DERIVADAS por aplicar_atribuicao() e ficam desabilitadas na grade — nunca
+# digitadas à mão, conforme pedido ("ao invés de ter que digitar").
+COLUNAS_EDITAVEIS_DIRETAMENTE: List[str] = [
+    "PROVIDENCIA_NECESSARIA", "STATUS_PROVIDENCIA", "OBSERVACOES",
+    "ESTADO_VERIFICACAO", "OBSERVACAO_VERIFICACAO",
+    "SERVIDOR_RESPONSAVEL_NOME", "PRAZO_MANUAL_DIAS",
+]
+
+# Prazos oferecidos para atribuição manual (dias corridos), a critério de
+# quem atribui a tarefa — não é prazo normativo automático (esse já existe
+# em PARAMETROS_PRAZO/motor_prazos.py). "" = sem prazo manual definido.
+PRAZO_MANUAL_DIAS_OPCOES: List[str] = ["", "5", "10", "15", "20", "30", "45", "60", "90"]
+
+# Semiótica de cores replicando os marcadores/labels reais do Gmail da
+# cocarreira@tjma.jus.br (ver imagens anexadas e cocarreira_diagnostico_labels.gs).
+# Decisão de UI deste app — não é dado institucional/normativo.
+COR_CATEGORIA: Dict[str, str] = {
+    "AUXÍLIO BOLSA": "#8E24AA",
+    "COORDENADORIA": "#009688",
+    "HETEROIDENTIFICAÇÃO": "#D93025",
+    "PROMOÇÃO/PUBLICIDADE": "#F4B183",
+    "AG": "#6B6B6B",
+    "AVALIAÇÃO": "#6B6B6B",
+    "CONCURSOS": "#6B6B6B",
+    "CONTATOS": "#6B6B6B",
+    "CONVÊNIO": "#6B6B6B",
+    "CURSOS": "#6B6B6B",
+    "ESTÁGIO": "#6B6B6B",
+    "FISCAL DE CONTRATO": "#6B6B6B",
+    "SERVIDOR": "#6B6B6B",
+    "OUTROS": "#9E9E9E",
+}
+
+COR_STATUS_TRATAMENTO: Dict[str, str] = {
+    "Respondido": "#1E7B34",
+    "Encaminhado ao setor": "#E8710A",
+    "Enviado por nós": "#1565C0",
+    "Recebido": "#6B6B6B",
+    "Arquivado/Removido": "#6B6B6B",
+    "Ocorrência Planus (sistema)": "#6B6B6B",
+    "Sem status definido": "#9E9E9E",
+}
+
+
+def badge_html(texto: str, cor: str) -> str:
+    """Selo colorido inline — mesma semiótica de cor usada no Gmail da caixa."""
+    if not texto:
+        return ""
+    return (
+        f"<span style='background:{cor};color:#FFFFFF;padding:2px 10px;"
+        f"border-radius:10px;font-size:0.78rem;font-weight:600;"
+        f"white-space:nowrap;'>{texto}</span>"
+    )
+
+
+def preparar_servidores(df: Optional[pd.DataFrame]) -> Dict[str, str]:
+    """
+    Lê a aba SERVIDORES_COORDENADORIA e devolve {NOME: MATRICULA} só para
+    ATIVO=SIM. Fonte da lista suspensa — nunca digitação livre de nome de
+    servidor no editor de acompanhamento.
+    """
+    mapa: Dict[str, str] = {}
+    if df is None or df.empty:
+        return mapa
+    for _, linha in df.iterrows():
+        if str(linha.get("ATIVO", "")).strip().upper() not in ("SIM", "S", "TRUE", "1"):
+            continue
+        nome = str(linha.get("NOME", "")).strip()
+        if nome:
+            mapa[nome] = str(linha.get("MATRICULA", "")).strip()
+    return mapa
+
+
+def classificar_prazo_manual(data_limite_texto: str, hoje: Optional[pd.Timestamp] = None) -> str:
+    """Mesmo código de cor de classificar_prazo(), aplicado à data-limite
+    manual (PRAZO_MANUAL_DATA_LIMITE), calculada por aplicar_atribuicao()."""
+    texto = (data_limite_texto or "").strip()
+    if not texto:
+        return SEM_CLASSIFICACAO
+    limite = pd.to_datetime(texto, errors="coerce", dayfirst=True)
+    if pd.isna(limite):
+        return SEM_CLASSIFICACAO
+    referencia = pd.Timestamp(hoje or pd.Timestamp.now()).normalize()
+    dias = int((limite.normalize() - referencia).days)
+    if dias < 0:
+        return VENCIDO
+    if dias <= 5:
+        return VENCENDO
+    return DENTRO_DO_PRAZO
+
+
+def aplicar_atribuicao(
+    alteracoes: List[Dict[str, str]],
+    df_original: pd.DataFrame,
+    mapa_servidores: Dict[str, str],
+    hoje: Optional[pd.Timestamp] = None,
+) -> List[Dict[str, str]]:
+    """
+    Preenche por DERIVAÇÃO — nunca por digitação — os campos que dependem de
+    outro campo escolhido pelo usuário:
+
+      SERVIDOR_RESPONSAVEL_NOME (selecionado)
+        -> SERVIDOR_RESPONSAVEL_MATRICULA (buscada em SERVIDORES_COORDENADORIA)
+        -> DATA_ATRIBUICAO_TAREFA (hoje, só na PRIMEIRA atribuição; se a linha
+           já tinha atribuição anterior, a data não é sobrescrita)
+
+      PRAZO_MANUAL_DIAS (selecionado)
+        -> PRAZO_MANUAL_DATA_LIMITE (data-base + dias corridos; data-base é a
+           DATA_ATRIBUICAO_TAREFA vigente, ou hoje quando não houver)
+
+    Não altera nenhuma outra coluna. `alteracoes` é modificada in-place e
+    também retornada, para uso direto em atualizar_acompanhamento().
+    """
+    referencia = pd.Timestamp(hoje or pd.Timestamp.now()).normalize()
+    indice_original = df_original.set_index("ID_REGISTRO") if not df_original.empty else df_original
+
+    for mudanca in alteracoes:
+        id_registro = str(mudanca.get("ID_REGISTRO", ""))
+        linha_original = (
+            indice_original.loc[id_registro]
+            if id_registro and not df_original.empty and id_registro in indice_original.index
+            else None
+        )
+
+        if "SERVIDOR_RESPONSAVEL_NOME" in mudanca:
+            nome = str(mudanca["SERVIDOR_RESPONSAVEL_NOME"]).strip()
+            mudanca["SERVIDOR_RESPONSAVEL_MATRICULA"] = mapa_servidores.get(nome, "") if nome else ""
+            data_existente = (
+                str(linha_original.get("DATA_ATRIBUICAO_TAREFA", "")).strip()
+                if linha_original is not None else ""
+            )
+            if nome and not data_existente:
+                mudanca["DATA_ATRIBUICAO_TAREFA"] = referencia.strftime("%d/%m/%Y")
+            elif not nome:
+                mudanca["DATA_ATRIBUICAO_TAREFA"] = ""
+
+        if "PRAZO_MANUAL_DIAS" in mudanca:
+            dias_texto = str(mudanca["PRAZO_MANUAL_DIAS"]).strip()
+            if dias_texto:
+                data_atribuicao_atual = mudanca.get("DATA_ATRIBUICAO_TAREFA")
+                if data_atribuicao_atual is None and linha_original is not None:
+                    data_atribuicao_atual = str(linha_original.get("DATA_ATRIBUICAO_TAREFA", "")).strip()
+                base = pd.to_datetime(data_atribuicao_atual, errors="coerce", dayfirst=True) if data_atribuicao_atual else None
+                if base is None or pd.isna(base):
+                    base = referencia
+                try:
+                    limite = base.normalize() + pd.Timedelta(days=int(dias_texto))
+                    mudanca["PRAZO_MANUAL_DATA_LIMITE"] = limite.strftime("%d/%m/%Y")
+                except (ValueError, TypeError):
+                    mudanca["PRAZO_MANUAL_DATA_LIMITE"] = ""
+            else:
+                mudanca["PRAZO_MANUAL_DATA_LIMITE"] = ""
+
+    return alteracoes
+
 
 # ---------------------------------------------------------------------------
 # Normalização
