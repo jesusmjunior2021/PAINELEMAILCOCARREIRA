@@ -102,6 +102,39 @@ def bloco_detalhe(linha: pd.Series) -> None:
         if linha.get("LINK_PASTA_DRIVE"):
             st.link_button("📁 Abrir pasta no Drive (anexos)", linha["LINK_PASTA_DRIVE"])
 
+    st.markdown(
+        f"{repo.badge_html(linha['CATEGORIA_ASSUNTO'], repo.COR_CATEGORIA.get(linha['CATEGORIA_ASSUNTO'], '#9E9E9E'))} "
+        f"{repo.badge_html(linha['STATUS_TRATAMENTO'], repo.COR_STATUS_TRATAMENTO.get(linha['STATUS_TRATAMENTO'], '#9E9E9E'))}",
+        unsafe_allow_html=True,
+    )
+
+    estado_verif = linha.get("ESTADO_VERIFICACAO", "") or "Pendente"
+    st.divider()
+    st.markdown("##### Verificação da demanda")
+    c1, c2 = st.columns([1, 3])
+    c1.markdown(
+        repo.badge_html(estado_verif, repo.COR_ESTADO_VERIFICACAO.get(estado_verif, "#6B6B6B")),
+        unsafe_allow_html=True,
+    )
+    c2.markdown(linha.get("OBSERVACAO_VERIFICACAO", "") or "_(sem observação registrada)_")
+
+    servidor_nome = linha.get("SERVIDOR_RESPONSAVEL_NOME", "")
+    if servidor_nome:
+        st.markdown(
+            f"**Servidor responsável:** {servidor_nome} "
+            f"(mat. {linha.get('SERVIDOR_RESPONSAVEL_MATRICULA', '—') or '—'}) · "
+            f"**Atribuído em:** {linha.get('DATA_ATRIBUICAO_TAREFA', '—') or '—'}"
+        )
+    prazo_manual = linha.get("PRAZO_MANUAL_DATA_LIMITE", "")
+    if prazo_manual:
+        codigo_manual = repo.classificar_prazo_manual(prazo_manual)
+        st.markdown(
+            f"**Prazo manual:** {linha.get('PRAZO_MANUAL_DIAS', '')} dia(s) · "
+            f"limite em <span style='color:{repo.COR_PRAZO[codigo_manual]};font-weight:600;'>"
+            f"{prazo_manual}</span>",
+            unsafe_allow_html=True,
+        )
+
     if linha["CATEGORIA_ASSUNTO"] == "AUXÍLIO BOLSA":
         st.divider()
         st.markdown("##### Atenção especial — Auxílio Bolsa")
@@ -339,18 +372,34 @@ def pagina_auxilio_bolsa(df: pd.DataFrame) -> None:
 # Página 3 — Acompanhamento (edição leve)
 # ---------------------------------------------------------------------------
 
-def pagina_acompanhamento(df: pd.DataFrame) -> None:
-    st.subheader("Acompanhamento — providências e observações")
+def pagina_acompanhamento(df: pd.DataFrame, parametros: dict) -> None:
+    st.subheader("Acompanhamento — providências, verificação, atribuição e prazo")
     st.caption(
-        "Somente PROVIDENCIA_NECESSARIA, STATUS_PROVIDENCIA e OBSERVACOES são "
-        "graváveis. A gravação é pontual, célula a célula, localizada por "
-        "ID_REGISTRO — a aba nunca é reescrita em lote. Nada é salvo sem clique "
-        "explícito em Salvar."
+        "As colunas abaixo são graváveis. A gravação é pontual, célula a célula, "
+        "localizada por ID_REGISTRO — a aba nunca é reescrita em lote. Nada é "
+        "salvo sem clique explícito em Salvar. Matrícula, data de atribuição e "
+        "data-limite do prazo manual são DERIVADAS (não digitadas) a partir do "
+        "servidor e do prazo em dias escolhidos."
     )
+
+    legenda = " ".join(
+        repo.badge_html(estado, repo.COR_ESTADO_VERIFICACAO[estado])
+        for estado in repo.ESTADO_VERIFICACAO_OPCOES
+    )
+    st.markdown(f"**Legenda — Estado de verificação:** {legenda}", unsafe_allow_html=True)
 
     if df.empty:
         st.info("Nenhum registro corresponde aos filtros aplicados.")
         return
+
+    mapa_servidores = repo.preparar_servidores(parametros.get("SERVIDORES_COORDENADORIA"))
+    opcoes_servidor = [""] + sorted(mapa_servidores.keys())
+    if not mapa_servidores:
+        st.warning(
+            "A aba SERVIDORES_COORDENADORIA ainda não existe ou não tem linha "
+            "ATIVO=SIM na planilha — a lista de servidor responsável ficará vazia "
+            "até que NOME/MATRICULA sejam cadastrados lá."
+        )
 
     colunas_visiveis = [
         "ID_REGISTRO", "DATA_HORA_ENVIO", "CATEGORIA_ASSUNTO", "ASSUNTO",
@@ -366,12 +415,46 @@ def pagina_acompanhamento(df: pd.DataFrame) -> None:
         height=460,
         num_rows="fixed",
         key="editor_acompanhamento",
-        disabled=[c for c in colunas_visiveis if c not in COLUNAS_EDITAVEIS],
+        disabled=[c for c in colunas_visiveis if c not in repo.COLUNAS_EDITAVEIS_DIRETAMENTE],
         column_config={
             "STATUS_PROVIDENCIA": st.column_config.SelectboxColumn(
                 "STATUS_PROVIDENCIA",
                 options=repo.STATUS_PROVIDENCIA_OPCOES,
                 required=False,
+            ),
+            "ESTADO_VERIFICACAO": st.column_config.SelectboxColumn(
+                "ESTADO_VERIFICACAO",
+                options=repo.ESTADO_VERIFICACAO_OPCOES,
+                required=False,
+                help="Verificada/Resolvida exigem OBSERVACAO_VERIFICACAO preenchida.",
+            ),
+            "OBSERVACAO_VERIFICACAO": st.column_config.TextColumn(
+                "OBSERVACAO_VERIFICACAO", width="large",
+                help="O que foi feito — obrigatório para Verificada/Resolvida.",
+            ),
+            "SERVIDOR_RESPONSAVEL_NOME": st.column_config.SelectboxColumn(
+                "SERVIDOR_RESPONSAVEL_NOME",
+                options=opcoes_servidor,
+                required=False,
+                help="Selecionar da lista (SERVIDORES_COORDENADORIA) — não digitar.",
+            ),
+            "SERVIDOR_RESPONSAVEL_MATRICULA": st.column_config.TextColumn(
+                "SERVIDOR_RESPONSAVEL_MATRICULA", disabled=True,
+                help="Derivada automaticamente do nome selecionado.",
+            ),
+            "DATA_ATRIBUICAO_TAREFA": st.column_config.TextColumn(
+                "DATA_ATRIBUICAO_TAREFA", disabled=True,
+                help="Derivada automaticamente (data de hoje na 1ª atribuição).",
+            ),
+            "PRAZO_MANUAL_DIAS": st.column_config.SelectboxColumn(
+                "PRAZO_MANUAL_DIAS",
+                options=repo.PRAZO_MANUAL_DIAS_OPCOES,
+                required=False,
+                help="Prazo de solução em dias corridos, a critério de quem atribui.",
+            ),
+            "PRAZO_MANUAL_DATA_LIMITE": st.column_config.TextColumn(
+                "PRAZO_MANUAL_DATA_LIMITE", disabled=True,
+                help="Derivada automaticamente (data de atribuição + dias).",
             ),
             "PROVIDENCIA_NECESSARIA": st.column_config.TextColumn(width="large"),
             "OBSERVACOES": st.column_config.TextColumn(width="large"),
@@ -382,7 +465,7 @@ def pagina_acompanhamento(df: pd.DataFrame) -> None:
     alteracoes = []
     for posicao in range(len(original)):
         mudanca = {}
-        for coluna in COLUNAS_EDITAVEIS:
+        for coluna in repo.COLUNAS_EDITAVEIS_DIRETAMENTE:
             antes = str(original.at[posicao, coluna])
             depois = str(editado.at[posicao, coluna])
             if antes != depois:
@@ -391,13 +474,34 @@ def pagina_acompanhamento(df: pd.DataFrame) -> None:
             mudanca["ID_REGISTRO"] = str(original.at[posicao, "ID_REGISTRO"])
             alteracoes.append(mudanca)
 
+    alteracoes = repo.aplicar_atribuicao(alteracoes, df, mapa_servidores)
+
+    bloqueios = []
+    for mudanca in alteracoes:
+        estado_novo = mudanca.get("ESTADO_VERIFICACAO")
+        if estado_novo in repo.ESTADOS_QUE_EXIGEM_OBSERVACAO:
+            posicao = original.index[original["ID_REGISTRO"] == mudanca["ID_REGISTRO"]]
+            observacao = str(editado.at[posicao[0], "OBSERVACAO_VERIFICACAO"]).strip() if len(posicao) else ""
+            if not observacao:
+                bloqueios.append(mudanca["ID_REGISTRO"])
+
+    if bloqueios:
+        st.error(
+            f"{len(bloqueios)} registro(s) marcado(s) como Verificada/Resolvida sem "
+            "OBSERVACAO_VERIFICACAO preenchida — escreva o que foi feito antes de "
+            "salvar. ID_REGISTRO: " + ", ".join(bloqueios)
+        )
+
     if alteracoes:
         st.markdown(f"**{len(alteracoes)} linha(s) alterada(s), ainda não gravada(s):**")
         st.dataframe(pd.DataFrame(alteracoes), use_container_width=True, hide_index=True)
     else:
         st.caption("Nenhuma alteração pendente.")
 
-    if st.button("💾 Salvar alterações na planilha", type="primary", disabled=not alteracoes):
+    if st.button(
+        "💾 Salvar alterações na planilha", type="primary",
+        disabled=not alteracoes or bool(bloqueios),
+    ):
         try:
             gravadas = atualizar_acompanhamento(alteracoes)
         except ErroAcessoPlanilha as erro:
@@ -965,7 +1069,7 @@ def main() -> None:
     elif pagina == "Auxílio Bolsa":
         pagina_auxilio_bolsa(df_escopo)
     elif pagina == "Acompanhamento":
-        pagina_acompanhamento(df_escopo)
+        pagina_acompanhamento(df_escopo, parametros)
     else:
         pagina_ruido(df_filtrado)
 
