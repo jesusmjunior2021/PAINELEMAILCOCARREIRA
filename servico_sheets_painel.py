@@ -37,11 +37,25 @@ COLUNAS_PAINEL_GERAL: List[str] = [
     "RISCO_NORMATIVO_ART17",
     "PROVIDENCIA_NECESSARIA", "STATUS_PROVIDENCIA", "OBSERVACOES",
     "LINK_PASTA_DRIVE",
+    # --- MAT-COCARREIRA-EMAILAUTO-002 (aditivo, ao FIM, nada reordenado) ---
+    "ESTADO_VERIFICACAO", "OBSERVACAO_VERIFICACAO",
+    "SERVIDOR_RESPONSAVEL_NOME", "SERVIDOR_RESPONSAVEL_MATRICULA",
+    "DATA_ATRIBUICAO_TAREFA",
+    "PRAZO_MANUAL_DIAS", "PRAZO_MANUAL_DATA_LIMITE",
 ]
 
 # Únicas colunas que este app tem permissão de escrever.
+# SERVIDOR_RESPONSAVEL_MATRICULA, DATA_ATRIBUICAO_TAREFA e
+# PRAZO_MANUAL_DATA_LIMITE entram aqui porque PRECISAM ser gravadas — mas são
+# preenchidas por DERIVAÇÃO (repositorio_painel.aplicar_atribuicao), nunca por
+# digitação direta do usuário. Ver COLUNAS_EDITAVEIS_DIRETAMENTE em
+# repositorio_painel.py para a lista do que o usuário de fato digita/seleciona.
 COLUNAS_EDITAVEIS: List[str] = [
     "PROVIDENCIA_NECESSARIA", "STATUS_PROVIDENCIA", "OBSERVACOES",
+    "ESTADO_VERIFICACAO", "OBSERVACAO_VERIFICACAO",
+    "SERVIDOR_RESPONSAVEL_NOME", "SERVIDOR_RESPONSAVEL_MATRICULA",
+    "DATA_ATRIBUICAO_TAREFA",
+    "PRAZO_MANUAL_DIAS", "PRAZO_MANUAL_DATA_LIMITE",
 ]
 
 
@@ -200,7 +214,12 @@ def atualizar_acompanhamento(atualizacoes: List[Dict[str, Any]]) -> int:
 # Abas de parâmetro (DE_PARA_LABELS, REGRAS_CLASSIFICACAO, PARAMETROS_PRAZO)
 # ---------------------------------------------------------------------------
 
-ABAS_PARAMETRO = ["DE_PARA_LABELS", "REGRAS_CLASSIFICACAO", "PARAMETROS_PRAZO"]
+ABAS_PARAMETRO = [
+    "DE_PARA_LABELS", "REGRAS_CLASSIFICACAO", "PARAMETROS_PRAZO",
+    # MAT-COCARREIRA-EMAILAUTO-002 — fonte da lista suspensa de servidor
+    # responsável (nome -> matrícula), para não depender de digitação.
+    "SERVIDORES_COORDENADORIA",
+]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
